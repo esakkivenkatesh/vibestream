@@ -1,5 +1,7 @@
+const path = require('path');
 try {
-  require('dotenv').config();
+  require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+  require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 } catch (e) {
   // dotenv optional in production
 }
@@ -12,6 +14,11 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+const getJamendoClientId = () => {
+  const id = process.env.JAMENDO_CLIENT_ID || process.env.VITE_JAMENDO_CLIENT_ID || '';
+  return id.trim();
+};
 
 const EMOJI_LIST = ['🎵', '🌌', '🌃', '🎧', '🔥', '🌙', '💪', '🧠', '✨', '🎶', '🎸', '🎹'];
 
@@ -26,7 +33,7 @@ const getEmojiForTrack = (title, artist) => {
 };
 
 app.get("/api/health", (req, res) => {
-  const clientId = process.env.JAMENDO_CLIENT_ID;
+  const clientId = getJamendoClientId();
   res.json({
     status: "ok",
     message: "VibeStream backend running",
@@ -37,7 +44,7 @@ app.get("/api/health", (req, res) => {
 
 // GET /api/songs: Fetches live tracks from Jamendo API v3.0 using process.env.JAMENDO_CLIENT_ID
 app.get("/api/songs", async (req, res) => {
-  const clientId = process.env.JAMENDO_CLIENT_ID;
+  const clientId = getJamendoClientId();
 
   if (!clientId || clientId === 'your_client_id_here') {
     console.error(
