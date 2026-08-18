@@ -83,15 +83,30 @@ function App() {
   const audioRef = useRef(null)
   const [songs, setSongs] = useState([])
   const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [apiError, setApiError] = useState(null)
   const [search, setSearch] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [hasMore, setHasMore] = useState(true)
+  const [activeFilter, setActiveFilter] = useState('all')
 
-  const fetchSongs = (searchQuery = '') => {
-    setLoading(true)
+  const observerTarget = useRef(null)
+
+  const fetchSongs = (searchQuery = '', currentOffset = 0, filter = 'all') => {
+    if (currentOffset === 0) {
+      setLoading(true)
+    } else {
+      setLoadingMore(true)
+    }
     setApiError(null)
 
     const q = searchQuery.trim()
-    const queryParam = q ? `?search=${encodeURIComponent(q)}&limit=200` : '?limit=200'
+    let queryParam = `?limit=200&offset=${currentOffset}`
+    if (q) {
+      queryParam += `&search=${encodeURIComponent(q)}`
+    } else if (filter === 'tamil') {
+      queryParam += `&tags=tamil`
+    }
 
     fetch(`${API_URL}/api/songs${queryParam}`)
       .then((res) => {
@@ -110,22 +125,41 @@ function App() {
           audio: song.audio || song.file,
           emoji: song.emoji || getEmojiForTrack(song.title || '', song.artist || ''),
         }))
-        setSongs(mappedSongs)
+        
+        if (currentOffset === 0) {
+          setSongs(mappedSongs)
+        } else {
+          setSongs(prev => [...prev, ...mappedSongs])
+        }
+
+        setHasMore(mappedSongs.length === 200)
         setLoading(false)
+        setLoadingMore(false)
         setApiError(null)
       })
       .catch((err) => {
         console.error('Error fetching Jamendo songs from backend:', err)
         setLoading(false)
+        setLoadingMore(false)
         setApiError('Unable to load tracks from server. Please try again.')
       })
+  }
+
+  const loadMore = () => {
+    if (!loading && !loadingMore && hasMore) {
+      const newOffset = offset + 200
+      setOffset(newOffset)
+      fetchSongs(search, newOffset, activeFilter)
+    }
   }
 
   useEffect(() => {
     let isMounted = true
     const timer = setTimeout(() => {
       if (isMounted) {
-        fetchSongs(search)
+        setOffset(0)
+        setHasMore(true)
+        fetchSongs(search, 0, activeFilter)
       }
     }, 300)
 
@@ -133,7 +167,28 @@ function App() {
       isMounted = false
       clearTimeout(timer)
     }
-  }, [search])
+  }, [search, activeFilter])
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting && hasMore && !loading && !loadingMore) {
+          loadMore()
+        }
+      },
+      { threshold: 0.1 }
+    )
+
+    if (observerTarget.current) {
+      observer.observe(observerTarget.current)
+    }
+
+    return () => {
+      if (observerTarget.current) {
+        observer.unobserve(observerTarget.current)
+      }
+    }
+  }, [observerTarget.current, hasMore, loading, loadingMore, offset, search, activeFilter])
 
   const createShuffledQueue = (currentSong, songList = songs) => {
     const queue = songList.filter((song) => song.title !== currentSong?.title)
@@ -624,15 +679,39 @@ function App() {
             <button type="button">›</button>
           </div>
 
-          <div className="search-box">
-            <span>⌕</span>
+          <div className="search-container" style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <div className="search-box">
+              <span>⌕</span>
 
-            <input
-              type="text"
-              placeholder="What do you want to listen to?"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+              <input
+                type="text"
+                placeholder="What do you want to listen to?"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            
+            <button 
+              type="button" 
+              className={`filter-pill ${activeFilter === 'tamil' ? 'active' : ''}`}
+              onClick={() => {
+                const newFilter = activeFilter === 'tamil' ? 'all' : 'tamil';
+                setActiveFilter(newFilter);
+                if (newFilter === 'tamil') setSearch('');
+              }}
+              style={{
+                background: activeFilter === 'tamil' ? '#1db954' : 'rgba(255,255,255,0.1)',
+                color: '#fff',
+                border: 'none',
+                padding: '8px 16px',
+                borderRadius: '20px',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              Tamil Music
+            </button>
           </div>
 
           <div className="profile">
@@ -851,6 +930,16 @@ function App() {
                         ? `No songs found matching "${search}".`
                         : 'No songs available.'}
                 </p>
+              </div>
+            )}
+            
+            {/* Infinite Scroll Observer Target */}
+            {(!selectedPlaylist && !showLikedSongs && !loading && hasMore) && (
+              <div 
+                ref={observerTarget} 
+                style={{ height: '50px', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '20px 0' }}
+              >
+                {loadingMore ? 'Loading more tracks...' : 'Scroll for more'}
               </div>
             )}
           </div>

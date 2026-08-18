@@ -37,6 +37,7 @@ module.exports = async (req, res) => {
       const limitRaw = urlObj.searchParams.get('limit');
       const offsetRaw = urlObj.searchParams.get('offset');
       const searchRaw = urlObj.searchParams.get('search') || urlObj.searchParams.get('q') || '';
+      const tagsRaw = urlObj.searchParams.get('tags') || '';
       
       const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
       const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
@@ -50,9 +51,13 @@ module.exports = async (req, res) => {
         include: 'musicinfo',
       });
 
+      if (tagsRaw.trim()) {
+        params.set('tags', tagsRaw.trim());
+      }
+
       if (searchRaw.trim()) {
         params.set('name_search', searchRaw.trim());
-      } else {
+      } else if (!tagsRaw.trim()) {
         params.set('order', 'id_asc');
       }
 

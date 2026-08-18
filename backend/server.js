@@ -61,6 +61,7 @@ app.get("/api/songs", async (req, res) => {
 
   try {
     const rawSearch = (req.query.search || req.query.q || '').trim();
+    const rawTags = (req.query.tags || '').trim();
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
@@ -77,10 +78,14 @@ app.get("/api/songs", async (req, res) => {
       include: 'musicinfo',
     });
 
+    if (rawTags) {
+      params.set('tags', rawTags);
+    }
+
     if (rawSearch) {
       // name_search = search by track name or artist name
       params.set('name_search', rawSearch);
-    } else {
+    } else if (!rawTags) {
       // id_asc is a safe default that doesn't trigger usage limits
       params.set('order', 'id_asc');
     }
