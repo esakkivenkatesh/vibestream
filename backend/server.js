@@ -1,5 +1,8 @@
-// Load .env file if present (local dev). In production, set env vars directly.
-require('dotenv').config();
+try {
+  require('dotenv').config();
+} catch (e) {
+  // dotenv optional in production
+}
 
 const express = require("express");
 const cors = require("cors");
