@@ -1098,3 +1098,53 @@ button {
   border: 1px solid #555;
   box-shadow: 0 0 0 2px rgba(30, 215, 96, 0.15);
 }
+
+.song-artwork-img,
+.recent-artwork-img,
+.player-artwork-img,
+.queue-artwork-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.status-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  gap: 12px;
+  color: #aaa;
+  text-align: center;
+  width: 100%;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #1ed760;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.retry-button {
+  background: #1ed760;
+  color: #000;
+  font-weight: bold;
+  padding: 8px 20px;
+  border-radius: 20px;
+  margin-top: 6px;
+  transition: background 0.2s ease, transform 0.1s ease;
+}
+
+.retry-button:hover {
+  background: #1fdf64;
+  transform: scale(1.03);
+}

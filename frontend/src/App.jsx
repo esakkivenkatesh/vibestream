@@ -5,33 +5,6 @@ const API_URL = import.meta.env.VITE_API_URL !== undefined
   : (import.meta.env.DEV ? 'http://localhost:5000' : '')
 
 
-const defaultSongs = [
-  {
-    title: 'Seval Kodi',
-    artist: 'Tamil Music',
-    emoji: '🎵',
-    audio: '/music/seval-kodi.mp3',
-  },
-  {
-    title: 'Dreaming',
-    artist: 'Vibe Artist',
-    emoji: '🌌',
-    audio: '/music/tape-echo-dream-dreaming-567732.mp3',
-  },
-  {
-    title: 'Midnight',
-    artist: 'Nova',
-    emoji: '🌃',
-    audio: '/music/the_mountain-midnight-beat-139503.mp3',
-  },
-  {
-    title: 'Lost in Sound',
-    artist: 'Echo',
-    emoji: '🎧',
-    audio: '/music/vishiv-lost-in-my-own-world-424917.mp3',
-  },
-]
-
 const playlistCards = [
   { title: 'Chill Vibes', description: 'Relaxing music', emoji: '🎧' },
   { title: 'Top Hits', description: 'Your favorite hits', emoji: '🔥' },
@@ -95,37 +68,72 @@ const getStoredPlaybackSettings = () => {
   }
 }
 
-const EMOJI_MAP = {
-  'Seval Kodi': '🎵',
-  'Dreaming': '🌌',
-  'Midnight': '🌃',
-  'The Mountain': '🌃',
-  'Lost in Sound': '🎧',
-  'Lost in My Own World': '🎧',
+const EMOJI_LIST = ['🎵', '🌌', '🌃', '🎧', '🔥', '🌙', '💪', '🧠', '✨', '🎶', '🎸', '🎹']
+const getEmojiForTrack = (title, artist) => {
+  const str = (title + artist).toLowerCase()
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i)
+    hash |= 0
+  }
+  return EMOJI_LIST[Math.abs(hash) % EMOJI_LIST.length]
 }
 
 function App() {
   const audioRef = useRef(null)
-  const [songs, setSongs] = useState(defaultSongs)
+  const [songs, setSongs] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [apiError, setApiError] = useState(null)
+  const [search, setSearch] = useState('')
 
-  useEffect(() => {
-    fetch(`${API_URL}/api/songs`)
+  const fetchSongs = (searchQuery = '') => {
+    setLoading(true)
+    setApiError(null)
+
+    const q = searchQuery.trim()
+    const queryParam = q ? `?search=${encodeURIComponent(q)}&limit=200` : '?limit=200'
+
+    fetch(`${API_URL}/api/songs${queryParam}`)
       .then((res) => {
         if (!res.ok) throw new Error('Failed to fetch songs')
         return res.json()
       })
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const mappedSongs = data.map((song) => ({
-            ...song,
-            audio: song.audio || song.file,
-            emoji: song.emoji || EMOJI_MAP[song.title] || '🎵',
-          }))
-          setSongs(mappedSongs)
-        }
+        const rawList = Array.isArray(data) ? data : (data.songs || [])
+        const mappedSongs = rawList.map((song) => ({
+          id: String(song.id || song.title),
+          title: song.title,
+          artist: song.artist,
+          album: song.album || 'Jamendo Collection',
+          duration: song.duration || 0,
+          artwork: song.artwork || song.image || null,
+          audio: song.audio || song.file,
+          emoji: song.emoji || getEmojiForTrack(song.title || '', song.artist || ''),
+        }))
+        setSongs(mappedSongs)
+        setLoading(false)
+        setApiError(null)
       })
-      .catch((err) => console.error('Error fetching songs from backend:', err))
-  }, [])
+      .catch((err) => {
+        console.error('Error fetching Jamendo songs from backend:', err)
+        setLoading(false)
+        setApiError('Unable to load tracks from server. Please try again.')
+      })
+  }
+
+  useEffect(() => {
+    let isMounted = true
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        fetchSongs(search)
+      }
+    }, 300)
+
+    return () => {
+      isMounted = false
+      clearTimeout(timer)
+    }
+  }, [search])
 
   const createShuffledQueue = (currentSong, songList = songs) => {
     const queue = songList.filter((song) => song.title !== currentSong?.title)
@@ -137,8 +145,6 @@ function App() {
 
     return queue
   }
-
-  const [search, setSearch] = useState('')
   const [currentSong, setCurrentSong] = useState(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -656,10 +662,16 @@ function App() {
                 <button
                   type="button"
                   className="recently-played-song"
-                  key={song.title}
+                  key={song.id || song.title}
                   onClick={() => playSong(song)}
                 >
-                  <span className="recent-song-art">{song.emoji}</span>
+                  <span className="recent-song-art">
+                    {song.artwork ? (
+                      <img src={song.artwork} alt={song.title} className="recent-artwork-img" />
+                    ) : (
+                      song.emoji || '🎵'
+                    )}
+                  </span>
                   <span className="recent-song-info">
                     <strong>{song.title}</strong>
                     <span>{song.artist}</span>
@@ -698,7 +710,7 @@ function App() {
                   <button
                     type="button"
                     className="play-button"
-                    onClick={() => playSong(songs[0])}
+                    onClick={() => songs[0] && playSong(songs[0])}
                   >
                     ▶
                   </button>
@@ -730,10 +742,26 @@ function App() {
           </div>
 
           <div className="song-list">
-            {visibleSongs.map((song, index) => (
+            {loading && (
+              <div className="status-container">
+                <div className="spinner" />
+                <p>Loading songs from Jamendo...</p>
+              </div>
+            )}
+
+            {!loading && apiError && (
+              <div className="status-container error-container">
+                <p>⚠️ {apiError}</p>
+                <button type="button" className="retry-button" onClick={() => fetchSongs(search)}>
+                  Retry
+                </button>
+              </div>
+            )}
+
+            {!loading && !apiError && visibleSongs.map((song, index) => (
               <div
                 className="song-row"
-                key={song.title}
+                key={song.id || song.title}
                 role="row"
                 tabIndex={0}
                 onDoubleClick={() => playSong(song)}
@@ -741,7 +769,13 @@ function App() {
               >
                 <span className="song-number">{index + 1}</span>
 
-                <div className="song-art">{song.emoji}</div>
+                <div className="song-art">
+                  {song.artwork ? (
+                    <img src={song.artwork} alt={song.title} className="song-artwork-img" />
+                  ) : (
+                    song.emoji || '🎵'
+                  )}
+                </div>
 
                 <div className="song-info">
                   <strong>{song.title}</strong>
@@ -749,13 +783,13 @@ function App() {
                 </div>
 
                 <span className="song-album">
-                  VibeStream Collection
+                  {song.album || 'Jamendo Collection'}
                 </span>
 
                 <span className="song-duration">
                   {currentSong?.title === song.title
                     ? formatTime(duration)
-                    : '4:52'}
+                    : formatTime(song.duration)}
                 </span>
 
                 <button
@@ -805,12 +839,19 @@ function App() {
                 </button>
               </div>
             ))}
-            {visibleSongs.length === 0 && (
-              <p className="empty-song-list">
-                {selectedPlaylist
-                  ? 'No songs in this playlist yet.'
-                  : 'No songs found.'}
-              </p>
+
+            {!loading && !apiError && visibleSongs.length === 0 && (
+              <div className="status-container empty-container">
+                <p>
+                  {selectedPlaylist
+                    ? 'No songs in this playlist yet.'
+                    : showLikedSongs
+                      ? 'No liked songs yet.'
+                      : search
+                        ? `No songs found matching "${search}".`
+                        : 'No songs available.'}
+                </p>
+              </div>
             )}
           </div>
 
@@ -821,7 +862,11 @@ function App() {
       <footer className="player">
         <div className="now-playing">
           <div className="player-art">
-            {currentSong ? currentSong.emoji : '🎵'}
+            {currentSong?.artwork ? (
+              <img src={currentSong.artwork} alt={currentSong.title} className="player-artwork-img" />
+            ) : (
+              currentSong?.emoji || '🎵'
+            )}
           </div>
 
           <div>
@@ -958,7 +1003,13 @@ function App() {
           </div>
 
           <div className="queue-current-song">
-            <span>{currentSong ? currentSong.emoji : '🎵'}</span>
+            <span>
+              {currentSong?.artwork ? (
+                <img src={currentSong.artwork} alt={currentSong.title} className="queue-artwork-img" />
+              ) : (
+                currentSong?.emoji || '🎵'
+              )}
+            </span>
             <div>
               <strong>{currentSong ? currentSong.title : 'No song selected'}</strong>
               <small>{currentSong ? currentSong.artist : 'Choose a song to start'}</small>
@@ -970,13 +1021,19 @@ function App() {
               <button
                 type="button"
                 className="queue-song"
-                key={song.title}
+                key={song.id || song.title}
                 onClick={() => {
                   setIsQueueOpen(false)
                   playSong(song)
                 }}
               >
-                <span>{song.emoji}</span>
+                <span>
+                  {song.artwork ? (
+                    <img src={song.artwork} alt={song.title} className="queue-artwork-img" />
+                  ) : (
+                    song.emoji || '🎵'
+                  )}
+                </span>
                 <div>
                   <strong>{song.title}</strong>
                   <small>{song.artist}</small>
