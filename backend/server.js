@@ -83,8 +83,8 @@ app.get("/api/songs", async (req, res) => {
     }
 
     if (rawSearch) {
-      // name_search = search by track name or artist name
-      params.set('name_search', rawSearch);
+      // search = full text search across track, artist, album, tags
+      params.set('search', rawSearch);
     } else if (!rawTags) {
       // id_asc is a safe default that doesn't trigger usage limits
       params.set('order', 'id_asc');

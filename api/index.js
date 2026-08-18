@@ -56,7 +56,7 @@ module.exports = async (req, res) => {
       }
 
       if (searchRaw.trim()) {
-        params.set('name_search', searchRaw.trim());
+        params.set('search', searchRaw.trim());
       } else if (!tagsRaw.trim()) {
         params.set('order', 'id_asc');
       }
