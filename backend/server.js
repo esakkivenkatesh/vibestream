@@ -32,6 +32,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// GET /api/songs: Fetches live tracks from Jamendo API v3.0 using process.env.JAMENDO_CLIENT_ID
 app.get("/api/songs", async (req, res) => {
   const clientId = process.env.JAMENDO_CLIENT_ID;
 
