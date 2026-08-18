@@ -105,7 +105,7 @@ function App() {
     if (q) {
       queryParam += `&search=${encodeURIComponent(q)}`
     } else if (filter === 'tamil') {
-      queryParam += `&tags=tamil`
+      queryParam += `&search=tamil`
     }
 
     fetch(`${API_URL}/api/songs${queryParam}`)
