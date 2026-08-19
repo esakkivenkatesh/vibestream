@@ -46,65 +46,80 @@ const mapTrack = (track) => ({
 });
 
 // ─── Tamil music discovery configuration ───────────────────────────────────
-// Strategy: run multiple Jamendo queries in parallel, merge, deduplicate by ID.
-// Jamendo doesn't have a dedicated "Tamil" tag, so we use a combination of:
-//  • tag searches for related genre tags
-//  • full-text searches for Tamil-related keywords
-const TAMIL_STRATEGIES = [
-  // Tag-based queries
-  { type: 'tags',   value: 'indian' },
-  { type: 'tags',   value: 'carnatic' },
-  { type: 'tags',   value: 'folk' },
-  { type: 'tags',   value: 'world' },
-  // Full-text search queries
-  { type: 'search', value: 'tamil' },
-  { type: 'search', value: 'carnatic' },
-  { type: 'search', value: 'kollywood' },
-  { type: 'search', value: 'india' },
-  { type: 'search', value: 'south indian' },
+//
+// JAMENDO REALITY CHECK (verified 2026-08-19):
+//   tags=tamil      → 0 results  (no tracks tagged "tamil")
+//   search=tamil    → 0 results  (no tracks with "tamil" in name/artist/album)
+//   search=kollywood → 0 results
+//   tags=indian     → generic Bollywood/world music, NOT Tamil
+//   tags=world      → generic world music, NOT Tamil
+//   search=carnatic → 20 results  ← ONLY query returning real Tamil music
+//
+// Strategy: fetch search=carnatic, then apply a strict relevance filter so
+// only tracks that are verifiably Carnatic/Tamil classical music pass through.
+// Tracks that merely mention "carnatic" in an unrelated context (e.g., a jazz
+// track named "Carnatic lizzard" with genres jazz/rock/ragga) are rejected.
+
+// Words that confirm a track is genuine Carnatic/Tamil classical music.
+// These are raga names, Tamil-language words found in song titles, and
+// Carnatic music vocabulary — they do NOT appear in non-Tamil Indian music.
+const CARNATIC_MARKERS = [
+  // Classic Carnatic markers in vartags
+  'carnatic',
+  // Raga names that appear in this dataset's track/album names
+  'sindhubhairavi', 'thodi', 'behag', 'khamas', 'ganamurthi',
+  'nalinakanthi', 'vasantha', 'hemavathi', 'mayamalavagowlai',
+  'kapi', 'kaanada', 'hindolam', 'hindola',
+  // Tamil words found in track titles (transliterations)
+  'alaipayuthey', 'irakkam', 'punnaimaranizhalil', 'chinnanchirupennpole',
+  'santanagopalakrishnam', 'ganamurthe', 'kaddanuvariki',
+  'manavyalagincharathate', 'deva-deva', 'ragamalika', 'alapana', 'varnam',
+  // Known Tamil/Carnatic artist names in this dataset
+  'aswinsainarain', 'music@ncbs',
 ];
 
-// In-memory cache for merged Tamil catalog (refreshes every 30 min)
-let tamilCache = null;
-let tamilCacheExpiry = 0;
-const TAMIL_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+// Album names that are known Carnatic concert albums in this dataset
+const CARNATIC_ALBUM_MARKERS = [
+  'carnatic', 'indian carnatic',
+];
 
 /**
- * Fetch a single Jamendo query page.
- * Returns an array of raw track objects (or empty array on failure).
+ * Returns true if the track is verifiably Carnatic/Tamil classical music.
+ * Requires at least one Carnatic marker to appear in the track's combined
+ * metadata (name + artist + album + vartags + genres).
+ * Rejects tracks where the only match is a genre like "indian" or "world"
+ * without any Carnatic-specific vocabulary.
  */
-async function fetchJamendoPage(clientId, strategy, limit, offset) {
-  const params = new URLSearchParams({
-    client_id: clientId,
-    format: 'json',
-    limit: String(limit),
-    offset: String(offset),
-    audioformat: 'mp32',
-    include: 'musicinfo',
-  });
+function isTamilCarnatic(track) {
+  const name    = (track.name || '').toLowerCase();
+  const artist  = (track.artist_name || '').toLowerCase();
+  const album   = (track.album_name || '').toLowerCase();
+  const vartags = (track.musicinfo?.tags?.vartags || []).join(' ').toLowerCase();
+  const genres  = (track.musicinfo?.tags?.genres  || []).join(' ').toLowerCase();
 
-  if (strategy.type === 'tags') {
-    params.set('tags', strategy.value);
-  } else {
-    params.set('search', strategy.value);
-  }
+  // Reject tracks whose genres are purely non-Carnatic (e.g., jazz/rock/ragga)
+  // even if the track name mentions "carnatic".
+  const nonCarnaticGenres = ['jazz', 'rock', 'ragga', 'hiphop', 'electronic', 'pop', 'reggae', 'metal', 'punk', 'blues', 'country', 'folk'];
+  const hasBadGenre = nonCarnaticGenres.some(g => genres.includes(g));
+  // Allow only if a Carnatic marker appears in vartags too
+  const hasCarnatic = vartags.includes('carnatic');
+  if (hasBadGenre && !hasCarnatic) return false;
 
-  const url = `https://api.jamendo.com/v3.0/tracks/?${params.toString()}`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (!data.headers || data.headers.status !== 'success' || data.headers.code !== 0) return [];
-    return Array.isArray(data.results) ? data.results : [];
-  } catch {
-    return [];
-  }
+  // Must match at least one Carnatic marker anywhere in the track metadata
+  const combined = `${name} ${artist} ${album} ${vartags}`;
+  return CARNATIC_MARKERS.some(marker => combined.includes(marker)) ||
+         CARNATIC_ALBUM_MARKERS.some(marker => album.includes(marker));
 }
 
+// In-memory cache (refreshes every 30 min)
+let tamilCache = null;
+let tamilCacheExpiry = 0;
+const TAMIL_CACHE_TTL_MS = 30 * 60 * 1000;
+
 /**
- * Build (and cache) the merged Tamil catalog.
- * Runs all strategies in parallel, merges results, deduplicates by track ID,
- * filters out tracks with no audio URL, and returns a deduplicated list.
+ * Build (and cache) the Tamil-only Carnatic catalog.
+ * Uses a single search=carnatic query (the only Jamendo query that reliably
+ * returns Tamil/Carnatic classical music), then filters to confirmed tracks.
  */
 async function buildTamilCatalog(clientId) {
   const now = Date.now();
@@ -112,35 +127,56 @@ async function buildTamilCatalog(clientId) {
     return tamilCache;
   }
 
-  console.log('[VibeStream] Building Tamil catalog from Jamendo (multi-strategy)...');
+  console.log('[VibeStream] Building Tamil/Carnatic catalog from Jamendo...');
 
-  // Run all strategies in parallel, each fetching up to 200 results
-  const results = await Promise.allSettled(
-    TAMIL_STRATEGIES.map((strategy) => fetchJamendoPage(clientId, strategy, 200, 0))
-  );
+  // search=carnatic is the single reliable source of Tamil music on Jamendo.
+  // Note: tags=tamil/search=tamil both return 0 results as of 2026-08-19.
+  const params = new URLSearchParams({
+    client_id: clientId,
+    format: 'json',
+    limit: '200',
+    offset: '0',
+    audioformat: 'mp32',
+    include: 'musicinfo',
+    search: 'carnatic',
+  });
 
-  const seen = new Set();
-  const merged = [];
-
-  for (const result of results) {
-    if (result.status !== 'fulfilled') continue;
-    const tracks = result.value;
-    for (const track of tracks) {
-      const trackId = String(track.id);
-      // Skip duplicates and tracks with no audio
-      if (seen.has(trackId)) continue;
-      const audio = track.audio || track.audiodownload;
-      if (!audio) continue;
-      seen.add(trackId);
-      merged.push(track);
+  let rawTracks = [];
+  try {
+    const url = `https://api.jamendo.com/v3.0/tracks/?${params.toString()}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.headers?.status === 'success' && data.headers?.code === 0) {
+        rawTracks = Array.isArray(data.results) ? data.results : [];
+      }
     }
+  } catch (err) {
+    console.error('[VibeStream] Error fetching carnatic tracks:', err);
   }
 
-  console.log(`[VibeStream] Tamil catalog built: ${merged.length} unique tracks`);
+  // Apply strict Tamil/Carnatic relevance filter + require playable audio
+  const seen = new Set();
+  const catalog = [];
+  for (const track of rawTracks) {
+    const trackId = String(track.id);
+    if (seen.has(trackId)) continue;
+    seen.add(trackId);
 
-  tamilCache = merged;
+    const audio = track.audio || track.audiodownload;
+    if (!audio) continue;                // must be playable
+    if (!isTamilCarnatic(track)) {       // must be verifiably Tamil/Carnatic
+      console.log(`[VibeStream] Tamil filter: rejected "${track.name}" by "${track.artist_name}"`);
+      continue;
+    }
+    catalog.push(track);
+  }
+
+  console.log(`[VibeStream] Tamil catalog: ${catalog.length}/${rawTracks.length} tracks passed Tamil filter`);
+
+  tamilCache = catalog;
   tamilCacheExpiry = now + TAMIL_CACHE_TTL_MS;
-  return merged;
+  return catalog;
 }
 
 // ─── Health endpoint ────────────────────────────────────────────────────────
