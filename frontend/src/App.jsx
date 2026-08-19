@@ -101,14 +101,20 @@ function App() {
     setApiError(null)
 
     const q = searchQuery.trim()
-    let queryParam = `?limit=200&offset=${currentOffset}`
-    if (q) {
-      queryParam += `&search=${encodeURIComponent(q)}`
-    } else if (filter === 'tamil') {
-      queryParam += `&search=tamil`
+
+    let url
+    if (!q && filter === 'tamil') {
+      // Use the dedicated Tamil discovery endpoint
+      url = `${API_URL}/api/songs/tamil?limit=50&offset=${currentOffset}`
+    } else {
+      let queryParam = `?limit=50&offset=${currentOffset}`
+      if (q) {
+        queryParam += `&search=${encodeURIComponent(q)}`
+      }
+      url = `${API_URL}/api/songs${queryParam}`
     }
 
-    fetch(`${API_URL}/api/songs${queryParam}`)
+    fetch(url)
       .then((res) => {
         if (!res.ok) throw new Error('Failed to fetch songs')
         return res.json()
@@ -132,7 +138,13 @@ function App() {
           setSongs(prev => [...prev, ...mappedSongs])
         }
 
-        setHasMore(mappedSongs.length === 200)
+        // Use the explicit hasMore field if present (Tamil endpoint), otherwise
+        // infer from page size (general endpoint returns up to 50 per page)
+        if (typeof data.hasMore === 'boolean') {
+          setHasMore(data.hasMore)
+        } else {
+          setHasMore(mappedSongs.length === 50)
+        }
         setLoading(false)
         setLoadingMore(false)
         setApiError(null)
@@ -147,7 +159,7 @@ function App() {
 
   const loadMore = () => {
     if (!loading && !loadingMore && hasMore) {
-      const newOffset = offset + 200
+      const newOffset = offset + 50
       setOffset(newOffset)
       fetchSongs(search, newOffset, activeFilter)
     }

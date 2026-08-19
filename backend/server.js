@@ -32,6 +32,118 @@ const getEmojiForTrack = (title, artist) => {
   return EMOJI_LIST[Math.abs(hash) % EMOJI_LIST.length];
 };
 
+// Shared track mapper used by both endpoints
+const mapTrack = (track) => ({
+  id: String(track.id),
+  title: track.name || 'Untitled Track',
+  artist: track.artist_name || 'Unknown Artist',
+  album: track.album_name || 'Jamendo',
+  duration: track.duration || 0,
+  artwork: track.image || track.album_image || null,
+  audio: track.audio || track.audiodownload || null,
+  file: track.audio || track.audiodownload || null,
+  emoji: getEmojiForTrack(track.name || '', track.artist_name || ''),
+});
+
+// ─── Tamil music discovery configuration ───────────────────────────────────
+// Strategy: run multiple Jamendo queries in parallel, merge, deduplicate by ID.
+// Jamendo doesn't have a dedicated "Tamil" tag, so we use a combination of:
+//  • tag searches for related genre tags
+//  • full-text searches for Tamil-related keywords
+const TAMIL_STRATEGIES = [
+  // Tag-based queries
+  { type: 'tags',   value: 'indian' },
+  { type: 'tags',   value: 'carnatic' },
+  { type: 'tags',   value: 'folk' },
+  { type: 'tags',   value: 'world' },
+  // Full-text search queries
+  { type: 'search', value: 'tamil' },
+  { type: 'search', value: 'carnatic' },
+  { type: 'search', value: 'kollywood' },
+  { type: 'search', value: 'india' },
+  { type: 'search', value: 'south indian' },
+];
+
+// In-memory cache for merged Tamil catalog (refreshes every 30 min)
+let tamilCache = null;
+let tamilCacheExpiry = 0;
+const TAMIL_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Fetch a single Jamendo query page.
+ * Returns an array of raw track objects (or empty array on failure).
+ */
+async function fetchJamendoPage(clientId, strategy, limit, offset) {
+  const params = new URLSearchParams({
+    client_id: clientId,
+    format: 'json',
+    limit: String(limit),
+    offset: String(offset),
+    audioformat: 'mp32',
+    include: 'musicinfo',
+  });
+
+  if (strategy.type === 'tags') {
+    params.set('tags', strategy.value);
+  } else {
+    params.set('search', strategy.value);
+  }
+
+  const url = `https://api.jamendo.com/v3.0/tracks/?${params.toString()}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!data.headers || data.headers.status !== 'success' || data.headers.code !== 0) return [];
+    return Array.isArray(data.results) ? data.results : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build (and cache) the merged Tamil catalog.
+ * Runs all strategies in parallel, merges results, deduplicates by track ID,
+ * filters out tracks with no audio URL, and returns a deduplicated list.
+ */
+async function buildTamilCatalog(clientId) {
+  const now = Date.now();
+  if (tamilCache && now < tamilCacheExpiry) {
+    return tamilCache;
+  }
+
+  console.log('[VibeStream] Building Tamil catalog from Jamendo (multi-strategy)...');
+
+  // Run all strategies in parallel, each fetching up to 200 results
+  const results = await Promise.allSettled(
+    TAMIL_STRATEGIES.map((strategy) => fetchJamendoPage(clientId, strategy, 200, 0))
+  );
+
+  const seen = new Set();
+  const merged = [];
+
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    const tracks = result.value;
+    for (const track of tracks) {
+      const trackId = String(track.id);
+      // Skip duplicates and tracks with no audio
+      if (seen.has(trackId)) continue;
+      const audio = track.audio || track.audiodownload;
+      if (!audio) continue;
+      seen.add(trackId);
+      merged.push(track);
+    }
+  }
+
+  console.log(`[VibeStream] Tamil catalog built: ${merged.length} unique tracks`);
+
+  tamilCache = merged;
+  tamilCacheExpiry = now + TAMIL_CACHE_TTL_MS;
+  return merged;
+}
+
+// ─── Health endpoint ────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
   const clientId = getJamendoClientId();
   res.json({
@@ -41,6 +153,56 @@ app.get("/api/health", (req, res) => {
     jamendo_client_id_preview: clientId ? `${clientId.slice(0, 4)}****` : "NOT SET"
   });
 });
+
+// ─── Tamil music catalog endpoint ──────────────────────────────────────────
+// GET /api/songs/tamil?limit=50&offset=0
+// Returns paginated slice of the merged, deduplicated Tamil catalog.
+app.get("/api/songs/tamil", async (req, res) => {
+  const clientId = getJamendoClientId();
+
+  if (!clientId || clientId === 'your_client_id_here') {
+    return res.status(503).json({
+      error: "Jamendo client ID not configured on server.",
+      songs: [],
+      total: 0
+    });
+  }
+
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    // Force cache refresh if requested
+    if (req.query.refresh === '1') {
+      tamilCache = null;
+      tamilCacheExpiry = 0;
+    }
+
+    const catalog = await buildTamilCatalog(clientId);
+    const total = catalog.length;
+    const page = catalog.slice(offset, offset + limit);
+    const songs = page.map(mapTrack);
+
+    console.log(`[VibeStream] Tamil: returning ${songs.length}/${total} tracks (offset=${offset})`);
+
+    return res.json({
+      songs,
+      total,
+      limit,
+      offset,
+      hasMore: offset + limit < total,
+    });
+  } catch (error) {
+    console.error('[VibeStream] Error building Tamil catalog:', error);
+    return res.status(500).json({
+      error: 'Internal server error fetching Tamil music catalog',
+      songs: [],
+      total: 0
+    });
+  }
+});
+
+// ─── General songs endpoint ─────────────────────────────────────────────────
 
 // GET /api/songs: Fetches live tracks from Jamendo API v3.0 using process.env.JAMENDO_CLIENT_ID
 app.get("/api/songs", async (req, res) => {
@@ -139,19 +301,7 @@ app.get("/api/songs", async (req, res) => {
 
     const results = Array.isArray(data.results) ? data.results : [];
 
-    const songs = results.map((track) => ({
-      id: String(track.id),
-      title: track.name || 'Untitled Track',
-      artist: track.artist_name || 'Unknown Artist',
-      album: track.album_name || 'Jamendo',
-      duration: track.duration || 0,
-      // `image` is the album artwork, `album_image` is a fallback
-      artwork: track.image || track.album_image || null,
-      // `audio` is the direct MP3 stream URL when audioformat=mp32 is set
-      audio: track.audio || track.audiodownload || null,
-      file: track.audio || track.audiodownload || null,
-      emoji: getEmojiForTrack(track.name || '', track.artist_name || ''),
-    }));
+    const songs = results.map(mapTrack);
 
     console.log(`[VibeStream] Returning ${songs.length} tracks to client`);
 
