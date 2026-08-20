@@ -89,6 +89,7 @@ function App() {
   const [offset, setOffset] = useState(0)
   const [hasMore, setHasMore] = useState(true)
   const [activeFilter, setActiveFilter] = useState('all')
+  const [greeting, setGreeting] = useState(getGreeting)
 
   const observerTarget = useRef(null)
 
@@ -164,6 +165,21 @@ function App() {
       fetchSongs(search, newOffset, activeFilter)
     }
   }
+
+  function getGreeting() {
+    const hour = new Date().getHours()
+    if (hour >= 5 && hour < 12) return 'Good morning'
+    if (hour >= 12 && hour < 17) return 'Good afternoon'
+    if (hour >= 17 && hour < 21) return 'Good evening'
+    return 'Good night'
+  }
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setGreeting(getGreeting())
+    }, 60000)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     let isMounted = true
@@ -735,7 +751,7 @@ function App() {
 
         <section className="hero">
           <p>Welcome back</p>
-          <h1>{search ? 'Search results' : 'Good evening'}</h1>
+          <h1>{search ? 'Search results' : greeting}</h1>
           <span>
   {search
     ? `Results for "${search}"`
