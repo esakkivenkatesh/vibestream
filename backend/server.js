@@ -64,18 +64,27 @@ const mapTrack = (track) => ({
 // These are raga names, Tamil-language words found in song titles, and
 // Carnatic music vocabulary — they do NOT appear in non-Tamil Indian music.
 const CARNATIC_MARKERS = [
-  // Classic Carnatic markers in vartags
-  'carnatic',
   // Raga names that appear in this dataset's track/album names
   'sindhubhairavi', 'thodi', 'behag', 'khamas', 'ganamurthi',
   'nalinakanthi', 'vasantha', 'hemavathi', 'mayamalavagowlai',
   'kapi', 'kaanada', 'hindolam', 'hindola',
+  'shubapantuvarali', 'maand', 'anandhavalli',
   // Tamil words found in track titles (transliterations)
   'alaipayuthey', 'irakkam', 'punnaimaranizhalil', 'chinnanchirupennpole',
   'santanagopalakrishnam', 'ganamurthe', 'kaddanuvariki',
   'manavyalagincharathate', 'deva-deva', 'ragamalika', 'alapana', 'varnam',
+  // Known Carnatic compositions / kriti names found in this dataset
+  'jagadhodharana', 'srisatyanarayanam', 'muralidhara', 'su-r-li',
   // Known Tamil/Carnatic artist names in this dataset
   'aswinsainarain', 'music@ncbs',
+];
+
+// Track title patterns that indicate NON-Carnatic content (patriotic, generic, etc.)
+// These are checked FIRST and cause immediate rejection.
+const CARNATIC_BLOCKLIST = [
+  'vande mataram',
+  'national anthem',
+  'patriotic',
 ];
 
 // Album names that are known Carnatic concert albums in this dataset
@@ -101,11 +110,15 @@ function isTamilCarnatic(track) {
   // even if the track name mentions "carnatic".
   const nonCarnaticGenres = ['jazz', 'rock', 'ragga', 'hiphop', 'electronic', 'pop', 'reggae', 'metal', 'punk', 'blues', 'country', 'folk'];
   const hasBadGenre = nonCarnaticGenres.some(g => genres.includes(g));
-  // Allow only if a Carnatic marker appears in vartags too
-  const hasCarnatic = vartags.includes('carnatic');
-  if (hasBadGenre && !hasCarnatic) return false;
+  // Allow only if a specific Carnatic marker appears in vartags (generic 'carnatic' alone is not enough)
+  const hasSpecificCarnatic = CARNATIC_MARKERS.some(marker => vartags.includes(marker));
+  if (hasBadGenre && !hasSpecificCarnatic) return false;
 
-  // Must match at least one Carnatic marker anywhere in the track metadata
+  // Blocklist: reject tracks with non-Carnatic title patterns regardless of artist/album
+  const normalizedName = name.replace(/[-_ ]+/g, ' ');
+  if (CARNATIC_BLOCKLIST.some(pattern => normalizedName.includes(pattern))) return false;
+
+  // Must match at least one specific Carnatic marker anywhere in the track metadata
   const combined = `${name} ${artist} ${album} ${vartags}`;
   return CARNATIC_MARKERS.some(marker => combined.includes(marker)) ||
          CARNATIC_ALBUM_MARKERS.some(marker => album.includes(marker));
@@ -354,6 +367,164 @@ app.get("/api/songs", async (req, res) => {
       error: 'Internal server error fetching music catalog',
       songs: [],
       total: 0
+    });
+  }
+});
+
+// ─── Spotify Client Credentials token cache ─────────────────────────────────
+// Tokens last 3600 s; we refresh 60 s early to avoid races.
+let _spotifyToken = null;
+let _spotifyTokenExpiry = 0;
+
+/**
+ * Obtain (and cache) a Spotify Client Credentials Bearer token.
+ * Uses SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET from environment.
+ * The secret is NEVER sent to the client.
+ */
+async function getSpotifyToken() {
+  const clientId     = (process.env.SPOTIFY_CLIENT_ID     || '').trim();
+  const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error('SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET not set in environment.');
+  }
+
+  const now = Date.now();
+  if (_spotifyToken && now < _spotifyTokenExpiry) {
+    return _spotifyToken;
+  }
+
+  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  const response = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Spotify token request failed (${response.status}): ${text}`);
+  }
+
+  const data = await response.json();
+  _spotifyToken = data.access_token;
+  // Expire 60 s early to avoid using a token that's about to expire
+  _spotifyTokenExpiry = now + (data.expires_in - 60) * 1000;
+
+  console.log('[VibeStream] Spotify token refreshed (expires in ~' + data.expires_in + 's)');
+  return _spotifyToken;
+}
+
+/**
+ * Map a Spotify track object to a clean, attribution-ready metadata object.
+ * Deliberately OMITS preview_url and any audio download link.
+ */
+function mapSpotifyTrack(track) {
+  const artists = (track.artists || []).map(a => a.name).join(', ') || 'Unknown Artist';
+  const images  = track.album?.images || [];
+  // Pick the largest available artwork (Spotify returns multiple sizes)
+  const artwork = images.length > 0 ? images[0].url : null;
+
+  return {
+    source:      'spotify',                      // Always set — so UI can attribute correctly
+    spotifyId:   track.id,
+    spotifyUrl:  track.external_urls?.spotify || null,
+    title:       track.name || 'Untitled',
+    artist:      artists,
+    album:       track.album?.name || 'Unknown Album',
+    artwork,
+    releaseDate: track.album?.release_date || null,
+    durationMs:  track.duration_ms || 0,
+    explicit:    track.explicit || false,
+    popularity:  track.popularity ?? null,
+    // NOTE: no `audio`, no `file`, no `preview_url` — metadata only.
+  };
+}
+
+// ─── Spotify Tamil metadata endpoint ────────────────────────────────────────
+// GET /api/spotify/tamil?q=tamil+music&limit=50&offset=0
+//
+// Returns Spotify track metadata for Tamil/Carnatic music searches.
+// Does NOT stream, download, proxy, or rip audio. Metadata only.
+// All results include source:"spotify" for proper attribution.
+app.get('/api/spotify/tamil', async (req, res) => {
+  const clientId     = (process.env.SPOTIFY_CLIENT_ID     || '').trim();
+  const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
+
+  if (!clientId || !clientSecret) {
+    return res.status(503).json({
+      error: 'Spotify credentials not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to backend/.env',
+      tracks: [],
+      total: 0,
+    });
+  }
+
+  try {
+    const rawQ   = (req.query.q || 'tamil music').trim() || 'tamil music';
+    const limit  = Math.min(Math.max(parseInt(req.query.limit,  10) || 50, 1), 50);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const token = await getSpotifyToken();
+
+    const params = new URLSearchParams({
+      q:      rawQ,
+      type:   'track',
+      market: 'IN',          // India market — best coverage for Tamil music
+      limit:  String(limit),
+      offset: String(offset),
+    });
+
+    const searchUrl = `https://api.spotify.com/v1/search?${params.toString()}`;
+    console.log(`[VibeStream] Spotify search: q="${rawQ}" limit=${limit} offset=${offset}`);
+
+    const searchRes = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!searchRes.ok) {
+      const errText = await searchRes.text();
+      console.error(`[VibeStream] Spotify search error ${searchRes.status}:`, errText);
+      let parsedErr = errText;
+      try {
+        const jsonErr = JSON.parse(errText);
+        parsedErr = jsonErr.error?.message || jsonErr.error_description || errText;
+      } catch (e) {}
+      return res.status(502).json({
+        error: `Spotify API error (${searchRes.status}): ${parsedErr}`,
+        details: parsedErr,
+        tracks: [],
+        total: 0,
+      });
+    }
+
+    const data = await searchRes.json();
+    const items = data.tracks?.items || [];
+    const total = data.tracks?.total ?? 0;
+
+    const tracks = items.map(mapSpotifyTrack);
+
+    console.log(`[VibeStream] Spotify: returning ${tracks.length}/${total} tracks for q="${rawQ}"`);
+
+    return res.json({
+      source:  'spotify',
+      query:   rawQ,
+      tracks,
+      total,
+      limit,
+      offset,
+      hasMore: offset + limit < total,
+      attribution: 'Music data provided by Spotify. Playback requires a Spotify account.',
+    });
+
+  } catch (err) {
+    console.error('[VibeStream] Spotify endpoint error:', err.message);
+    return res.status(500).json({
+      error: err.message || 'Internal server error fetching Spotify metadata',
+      tracks: [],
+      total: 0,
     });
   }
 });
