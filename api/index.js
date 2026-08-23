@@ -162,9 +162,26 @@ const AUDIUS_TAMIL_KEYWORDS = [
 
 const AUDIUS_MIXED_LANGUAGE_REGEX = /(tamil\s*x\s*malayalam|malayalam\s*x\s*tamil|tamil\s*x\s*telugu|telugu\s*x\s*tamil|tamil\s*x\s*hindi|hindi\s*x\s*tamil|tamil\s*x\s*kannada|kannada\s*x\s*tamil|tamil\s*x\s*english|english\s*x\s*tamil)/i;
 
+function isAudiusAllowedLicense(lic) {
+  if (!lic || typeof lic !== 'string') return false;
+  const l = lic.trim().toLowerCase();
+
+  // Explicitly reject NC (NonCommercial), ND (NoDerivs), and All rights reserved
+  if (l.includes('nc') || l.includes('noncommercial') || l.includes('nd') || l.includes('noderivs') || l.includes('all rights reserved')) {
+    return false;
+  }
+
+  // Allow CC BY, CC0, and Public Domain
+  if (l.includes('cc by') || l === 'cc0' || l.includes('public domain') || l.includes('cc-by')) {
+    return true;
+  }
+
+  return false;
+}
+
 function isVerifiedAudiusTamil(track) {
   const lic = (track.license || '').trim();
-  if (!lic || lic === 'All rights reserved') {
+  if (!isAudiusAllowedLicense(lic)) {
     return false;
   }
 
