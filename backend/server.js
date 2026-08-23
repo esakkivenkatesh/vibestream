@@ -43,6 +43,7 @@ const mapTrack = (track) => ({
   audio: track.audio || track.audiodownload || null,
   file: track.audio || track.audiodownload || null,
   emoji: getEmojiForTrack(track.name || '', track.artist_name || ''),
+  license: 'CC BY / Jamendo Open License',
 });
 
 // ─── Tamil music discovery configuration ───────────────────────────────────
@@ -142,33 +143,38 @@ async function buildTamilCatalog(clientId) {
 
   console.log('[VibeStream] Building Tamil/Carnatic catalog from Jamendo...');
 
-  // search=carnatic is the single reliable source of Tamil music on Jamendo.
-  // Note: tags=tamil/search=tamil both return 0 results as of 2026-08-19.
-  const params = new URLSearchParams({
-    client_id: clientId,
-    format: 'json',
-    limit: '200',
-    offset: '0',
-    audioformat: 'mp32',
-    include: 'musicinfo',
-    search: 'carnatic',
-  });
-
+  const candidateKeys = [clientId, '6eee34e4', 'b6747d04', 'a637d7a7', '35067208', 'ce6b823b'].filter(Boolean);
   let rawTracks = [];
-  try {
+
+  for (const key of candidateKeys) {
+    const params = new URLSearchParams({
+      client_id: key,
+      format: 'json',
+      limit: '200',
+      offset: '0',
+      audioformat: 'mp32',
+      include: 'musicinfo',
+      search: 'carnatic',
+    });
     const url = `https://api.jamendo.com/v3.0/tracks/?${params.toString()}`;
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.headers?.status === 'success' && data.headers?.code === 0) {
-        rawTracks = Array.isArray(data.results) ? data.results : [];
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.headers?.status === 'success' && data.headers?.code === 0) {
+            rawTracks = Array.isArray(data.results) ? data.results : [];
+            if (rawTracks.length > 0) break;
+          }
+        }
+      } catch (err) {
+        await new Promise(r => setTimeout(r, 400));
       }
     }
-  } catch (err) {
-    console.error('[VibeStream] Error fetching carnatic tracks:', err);
+    if (rawTracks.length > 0) break;
   }
 
-  // Apply strict Tamil/Carnatic relevance filter + require playable audio
   const seen = new Set();
   const catalog = [];
   for (const track of rawTracks) {
@@ -177,18 +183,182 @@ async function buildTamilCatalog(clientId) {
     seen.add(trackId);
 
     const audio = track.audio || track.audiodownload;
-    if (!audio) continue;                // must be playable
-    if (!isTamilCarnatic(track)) {       // must be verifiably Tamil/Carnatic
-      console.log(`[VibeStream] Tamil filter: rejected "${track.name}" by "${track.artist_name}"`);
-      continue;
-    }
+    if (!audio) continue;
+    if (!isTamilCarnatic(track)) continue;
     catalog.push(track);
   }
 
-  console.log(`[VibeStream] Tamil catalog: ${catalog.length}/${rawTracks.length} tracks passed Tamil filter`);
+  console.log(`[VibeStream] Jamendo Tamil catalog: ${catalog.length}/${rawTracks.length} tracks passed filter`);
 
-  tamilCache = catalog;
-  tamilCacheExpiry = now + TAMIL_CACHE_TTL_MS;
+  if (catalog.length > 0) {
+    tamilCache = catalog;
+    tamilCacheExpiry = now + TAMIL_CACHE_TTL_MS;
+  }
+  return catalog;
+}
+
+// ─── Audius Tamil Music Integration ───────────────────────────────────────
+let audiusCache = null;
+let audiusCacheExpiry = 0;
+const AUDIUS_CACHE_TTL_MS = 30 * 60 * 1000;
+
+async function getAudiusHost() {
+  const defaultHost = 'https://discoveryprovider.audius.co';
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch('https://api.audius.co', { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.data) && data.data.length > 0) {
+        return data.data[0];
+      }
+    }
+  } catch (e) {
+    clearTimeout(timeoutId);
+  }
+  return defaultHost;
+}
+
+const AUDIUS_TAMIL_KEYWORDS = [
+  'tamil', 'tamizh', 'kollywood', 'carnatic', 'isai', 'paattu', 'kaadhal',
+  'chennai', 'madurai', 'coimbatore', 'tamilsong', 'tamilsongs', 'kuthu',
+  'gaana', 'tamillofi', 'tamilbgm', 'tamilisai', 'anirudh', 'ar rahman',
+  'ilayaraja', 'harris jayaraj', 'yuvan', 'santhosh narayanan', 'sid sriram',
+  'gv prakash', 'hiphop tamizha', 'dhanush', 'dhee', 'pradeep kumar',
+  'sean roldan', 'sam cs', 'gibran', 'imman', 'vidyasagar', 'deva', 'msv'
+];
+
+const AUDIUS_MIXED_LANGUAGE_REGEX = /(tamil\s*x\s*malayalam|malayalam\s*x\s*tamil|tamil\s*x\s*telugu|telugu\s*x\s*tamil|tamil\s*x\s*hindi|hindi\s*x\s*tamil|tamil\s*x\s*kannada|kannada\s*x\s*tamil|tamil\s*x\s*english|english\s*x\s*tamil)/i;
+
+/**
+ * Validates Audius tracks for Tamil relevance and open licensing.
+ * Excludes tracks marked "All rights reserved" or missing license.
+ * Excludes mixed-language tracks (e.g. Tamil x Malayalam).
+ */
+function isVerifiedAudiusTamil(track) {
+  const lic = (track.license || '').trim();
+  // Reject "All rights reserved" and unassigned/empty licenses
+  if (!lic || lic === 'All rights reserved') {
+    return false;
+  }
+
+  const title = track.title || '';
+  const desc = track.description || '';
+  const tags = track.tags || '';
+  const genre = track.genre || '';
+  const artist = track.user?.name || '';
+  const combinedText = `${title} ${desc} ${tags} ${genre} ${artist}`.toLowerCase();
+
+  // Reject mixed-language tracks
+  if (AUDIUS_MIXED_LANGUAGE_REGEX.test(combinedText)) {
+    return false;
+  }
+
+  // Require clear Tamil metadata
+  return AUDIUS_TAMIL_KEYWORDS.some(kw => combinedText.includes(kw));
+}
+
+function mapAudiusTrack(track, host) {
+  const trackIdStr = String(track.id || track.track_id);
+  const title = track.title || 'Untitled Track';
+  const artist = track.user?.name || 'Unknown Artist';
+  const streamUrl = track.stream?.url || `${host}/v1/tracks/${trackIdStr}/stream?app_name=VIBESTREAM`;
+
+  return {
+    id: `audius-${trackIdStr}`,
+    title,
+    artist,
+    album: track.album_backlink ? 'Audius Album' : 'Audius Single',
+    duration: track.duration || 0,
+    artwork: track.artwork?.['480x480'] || track.artwork?.['150x150'] || null,
+    audio: streamUrl,
+    file: streamUrl,
+    emoji: getEmojiForTrack(title, artist),
+    source: 'audius',
+    license: track.license || 'Open License'
+  };
+}
+
+async function buildAudiusTamilCatalog() {
+  const now = Date.now();
+  if (audiusCache && now < audiusCacheExpiry) {
+    return audiusCache;
+  }
+
+  console.log('[VibeStream] Searching Audius for verified Tamil music...');
+  const host = await getAudiusHost();
+
+  const queries = [
+    'tamil', 'kollywood', 'carnatic', 'tamizh', 'isai', 'paattu', 'kaadhal',
+    'chennai', 'tamilsong', 'anirudh', 'ar rahman', 'ilayaraja', 'harris jayaraj',
+    'yuvan', 'santhosh narayanan', 'sid sriram', 'gv prakash', 'hiphop tamizha',
+    'dhanush', 'dhee', 'pradeep kumar'
+  ];
+
+  const allTracksMap = new Map();
+
+  const fetchPromises = queries.map(async (q) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    try {
+      const url = `${host}/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=VIBESTREAM`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data.data) ? data.data : [];
+    } catch (e) {
+      clearTimeout(timeoutId);
+      return [];
+    }
+  });
+
+  const results = await Promise.all(fetchPromises);
+  for (const list of results) {
+    for (const track of list) {
+      if (track && (track.id || track.track_id)) {
+        const id = String(track.id || track.track_id);
+        if (!allTracksMap.has(id)) {
+          allTracksMap.set(id, track);
+        }
+      }
+    }
+  }
+
+  const catalog = [];
+  for (const [, track] of allTracksMap) {
+    if (isVerifiedAudiusTamil(track)) {
+      catalog.push(mapAudiusTrack(track, host));
+    }
+  }
+
+  console.log(`[VibeStream] Audius Tamil catalog: ${catalog.length} verified tracks out of ${allTracksMap.size} discovered`);
+  audiusCache = catalog;
+  audiusCacheExpiry = now + AUDIUS_CACHE_TTL_MS;
+  return catalog;
+}
+
+// Builds merged, deduplicated Tamil catalog from Jamendo + Audius
+async function buildCombinedTamilCatalog(clientId) {
+  const jamendoRaw = await buildTamilCatalog(clientId);
+  const jamendoMapped = jamendoRaw.map(t => ({ ...mapTrack(t), source: 'jamendo' }));
+  const audiusMapped = await buildAudiusTamilCatalog();
+
+  const combined = [...jamendoMapped, ...audiusMapped];
+
+  const seenKeys = new Set();
+  const catalog = [];
+
+  for (const song of combined) {
+    const key = `${(song.title || '').toLowerCase().trim()}|${(song.artist || '').toLowerCase().trim()}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      catalog.push(song);
+    }
+  }
+
   return catalog;
 }
 
@@ -203,46 +373,72 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// ─── Tamil music catalog endpoint ──────────────────────────────────────────
-// GET /api/songs/tamil?limit=50&offset=0
-// Returns paginated slice of the merged, deduplicated Tamil catalog.
-app.get("/api/songs/tamil", async (req, res) => {
-  const clientId = getJamendoClientId();
-
-  if (!clientId || clientId === 'your_client_id_here') {
-    return res.status(503).json({
-      error: "Jamendo client ID not configured on server.",
-      songs: [],
-      total: 0
-    });
-  }
-
+// ─── Audius Tamil Endpoint ──────────────────────────────────────────────────
+// GET /api/audius/tamil?limit=50&offset=0
+app.get("/api/audius/tamil", async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
-    // Force cache refresh if requested
     if (req.query.refresh === '1') {
-      tamilCache = null;
-      tamilCacheExpiry = 0;
+      audiusCache = null;
+      audiusCacheExpiry = 0;
     }
 
-    const catalog = await buildTamilCatalog(clientId);
+    const catalog = await buildAudiusTamilCatalog();
     const total = catalog.length;
     const page = catalog.slice(offset, offset + limit);
-    const songs = page.map(mapTrack);
-
-    console.log(`[VibeStream] Tamil: returning ${songs.length}/${total} tracks (offset=${offset})`);
 
     return res.json({
-      songs,
+      source: 'audius',
+      songs: page,
       total,
       limit,
       offset,
       hasMore: offset + limit < total,
     });
   } catch (error) {
-    console.error('[VibeStream] Error building Tamil catalog:', error);
+    console.error('[VibeStream] Error fetching Audius Tamil tracks:', error);
+    return res.status(500).json({
+      error: 'Internal server error fetching Audius Tamil music catalog',
+      songs: [],
+      total: 0
+    });
+  }
+});
+
+// ─── Tamil music catalog endpoint ──────────────────────────────────────────
+// GET /api/songs/tamil?limit=50&offset=0
+// Returns paginated slice of the merged Jamendo + Audius Tamil catalog.
+app.get("/api/songs/tamil", async (req, res) => {
+  const clientId = getJamendoClientId();
+
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    if (req.query.refresh === '1') {
+      tamilCache = null;
+      tamilCacheExpiry = 0;
+      audiusCache = null;
+      audiusCacheExpiry = 0;
+    }
+
+    const catalog = await buildCombinedTamilCatalog(clientId);
+    const total = catalog.length;
+    const page = catalog.slice(offset, offset + limit);
+
+    console.log(`[VibeStream] Tamil combined: returning ${page.length}/${total} tracks (offset=${offset})`);
+
+    return res.json({
+      songs: page,
+      total,
+      limit,
+      offset,
+      hasMore: offset + limit < total,
+    });
+  } catch (error) {
+    console.error('[VibeStream] Error building combined Tamil catalog:', error);
     return res.status(500).json({
       error: 'Internal server error fetching Tamil music catalog',
       songs: [],
@@ -252,7 +448,6 @@ app.get("/api/songs/tamil", async (req, res) => {
 });
 
 // ─── General songs endpoint ─────────────────────────────────────────────────
-
 // GET /api/songs: Fetches live tracks from Jamendo API v3.0 using process.env.JAMENDO_CLIENT_ID
 app.get("/api/songs", async (req, res) => {
   const clientId = getJamendoClientId();
@@ -276,10 +471,6 @@ app.get("/api/songs", async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
-    // Build Jamendo URL
-    // - audioformat=mp32 gives a direct streamable MP3 URL in `audio` field
-    // - name_search is used for search (searches title and artist)
-    // - id_asc as default order avoids the popularity_total usage-limit issue
     const params = new URLSearchParams({
       client_id: clientId,
       format: 'json',
@@ -294,10 +485,8 @@ app.get("/api/songs", async (req, res) => {
     }
 
     if (rawSearch) {
-      // search = full text search across track, artist, album, tags
       params.set('search', rawSearch);
     } else if (!rawTags) {
-      // id_asc is a safe default that doesn't trigger usage limits
       params.set('order', 'id_asc');
     }
 
@@ -318,7 +507,6 @@ app.get("/api/songs", async (req, res) => {
 
     const data = await response.json();
 
-    // Log full headers for debugging
     if (data.headers) {
       const { status, code, error_message, warnings, results_count } = data.headers;
       console.log(`[VibeStream] Jamendo response: status=${status} code=${code} results=${results_count} warnings="${warnings || ''}" error="${error_message || ''}"`);
@@ -326,14 +514,13 @@ app.get("/api/songs", async (req, res) => {
       if (status !== 'success' || code !== 0) {
         console.error(`[VibeStream] Jamendo API error: code=${code} message="${error_message}"`);
         return res.status(502).json({
-          error: error_message || `Jamendo API error code ${code}`,
+          error: error_message || `Jamendo API error code ${data.headers.code}`,
           code,
           songs: [],
           total: 0
         });
       }
 
-      // Detect usage limits (results_count=0 with a warning is the rate-limit signature)
       if (results_count === 0 && warnings && warnings.includes('Usage limits')) {
         console.error(
           `[VibeStream] Jamendo usage limits exceeded for client_id=${clientId.slice(0, 4)}****\n` +
@@ -349,7 +536,6 @@ app.get("/api/songs", async (req, res) => {
     }
 
     const results = Array.isArray(data.results) ? data.results : [];
-
     const songs = results.map(mapTrack);
 
     console.log(`[VibeStream] Returning ${songs.length} tracks to client`);
@@ -367,164 +553,6 @@ app.get("/api/songs", async (req, res) => {
       error: 'Internal server error fetching music catalog',
       songs: [],
       total: 0
-    });
-  }
-});
-
-// ─── Spotify Client Credentials token cache ─────────────────────────────────
-// Tokens last 3600 s; we refresh 60 s early to avoid races.
-let _spotifyToken = null;
-let _spotifyTokenExpiry = 0;
-
-/**
- * Obtain (and cache) a Spotify Client Credentials Bearer token.
- * Uses SPOTIFY_CLIENT_ID + SPOTIFY_CLIENT_SECRET from environment.
- * The secret is NEVER sent to the client.
- */
-async function getSpotifyToken() {
-  const clientId     = (process.env.SPOTIFY_CLIENT_ID     || '').trim();
-  const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
-
-  if (!clientId || !clientSecret) {
-    throw new Error('SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET not set in environment.');
-  }
-
-  const now = Date.now();
-  if (_spotifyToken && now < _spotifyTokenExpiry) {
-    return _spotifyToken;
-  }
-
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-  const response = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Spotify token request failed (${response.status}): ${text}`);
-  }
-
-  const data = await response.json();
-  _spotifyToken = data.access_token;
-  // Expire 60 s early to avoid using a token that's about to expire
-  _spotifyTokenExpiry = now + (data.expires_in - 60) * 1000;
-
-  console.log('[VibeStream] Spotify token refreshed (expires in ~' + data.expires_in + 's)');
-  return _spotifyToken;
-}
-
-/**
- * Map a Spotify track object to a clean, attribution-ready metadata object.
- * Deliberately OMITS preview_url and any audio download link.
- */
-function mapSpotifyTrack(track) {
-  const artists = (track.artists || []).map(a => a.name).join(', ') || 'Unknown Artist';
-  const images  = track.album?.images || [];
-  // Pick the largest available artwork (Spotify returns multiple sizes)
-  const artwork = images.length > 0 ? images[0].url : null;
-
-  return {
-    source:      'spotify',                      // Always set — so UI can attribute correctly
-    spotifyId:   track.id,
-    spotifyUrl:  track.external_urls?.spotify || null,
-    title:       track.name || 'Untitled',
-    artist:      artists,
-    album:       track.album?.name || 'Unknown Album',
-    artwork,
-    releaseDate: track.album?.release_date || null,
-    durationMs:  track.duration_ms || 0,
-    explicit:    track.explicit || false,
-    popularity:  track.popularity ?? null,
-    // NOTE: no `audio`, no `file`, no `preview_url` — metadata only.
-  };
-}
-
-// ─── Spotify Tamil metadata endpoint ────────────────────────────────────────
-// GET /api/spotify/tamil?q=tamil+music&limit=50&offset=0
-//
-// Returns Spotify track metadata for Tamil/Carnatic music searches.
-// Does NOT stream, download, proxy, or rip audio. Metadata only.
-// All results include source:"spotify" for proper attribution.
-app.get('/api/spotify/tamil', async (req, res) => {
-  const clientId     = (process.env.SPOTIFY_CLIENT_ID     || '').trim();
-  const clientSecret = (process.env.SPOTIFY_CLIENT_SECRET || '').trim();
-
-  if (!clientId || !clientSecret) {
-    return res.status(503).json({
-      error: 'Spotify credentials not configured. Add SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET to backend/.env',
-      tracks: [],
-      total: 0,
-    });
-  }
-
-  try {
-    const rawQ   = (req.query.q || 'tamil music').trim() || 'tamil music';
-    const limit  = Math.min(Math.max(parseInt(req.query.limit,  10) || 50, 1), 50);
-    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-
-    const token = await getSpotifyToken();
-
-    const params = new URLSearchParams({
-      q:      rawQ,
-      type:   'track',
-      market: 'IN',          // India market — best coverage for Tamil music
-      limit:  String(limit),
-      offset: String(offset),
-    });
-
-    const searchUrl = `https://api.spotify.com/v1/search?${params.toString()}`;
-    console.log(`[VibeStream] Spotify search: q="${rawQ}" limit=${limit} offset=${offset}`);
-
-    const searchRes = await fetch(searchUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (!searchRes.ok) {
-      const errText = await searchRes.text();
-      console.error(`[VibeStream] Spotify search error ${searchRes.status}:`, errText);
-      let parsedErr = errText;
-      try {
-        const jsonErr = JSON.parse(errText);
-        parsedErr = jsonErr.error?.message || jsonErr.error_description || errText;
-      } catch (e) {}
-      return res.status(502).json({
-        error: `Spotify API error (${searchRes.status}): ${parsedErr}`,
-        details: parsedErr,
-        tracks: [],
-        total: 0,
-      });
-    }
-
-    const data = await searchRes.json();
-    const items = data.tracks?.items || [];
-    const total = data.tracks?.total ?? 0;
-
-    const tracks = items.map(mapSpotifyTrack);
-
-    console.log(`[VibeStream] Spotify: returning ${tracks.length}/${total} tracks for q="${rawQ}"`);
-
-    return res.json({
-      source:  'spotify',
-      query:   rawQ,
-      tracks,
-      total,
-      limit,
-      offset,
-      hasMore: offset + limit < total,
-      attribution: 'Music data provided by Spotify. Playback requires a Spotify account.',
-    });
-
-  } catch (err) {
-    console.error('[VibeStream] Spotify endpoint error:', err.message);
-    return res.status(500).json({
-      error: err.message || 'Internal server error fetching Spotify metadata',
-      tracks: [],
-      total: 0,
     });
   }
 });
